@@ -65,6 +65,12 @@ jobs:
             turbo-${{ runner.os }}-${{ hashFiles('turbo.json', '**/package.json') }}-
             turbo-${{ runner.os }}-
 
+      - name: Provision native ripgrep on fork Windows runner
+        if: github.repository == 'projetsjsl/opencode' && runner.os == 'Windows'
+        timeout-minutes: 2
+        working-directory: packages/core
+        run: bun test test/ripgrep.test.ts --timeout 30000 --only-failures
+
       - name: Run unit tests
         timeout-minutes: 20
         run: GITHUB_ACTIONS=false bun turbo test
@@ -136,6 +142,15 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: packages/app
         run: bunx playwright install chromium
+
+      - name: Qualify Windows timeline fixture before full suite
+        if: github.repository == 'projetsjsl/opencode' && runner.os == 'Windows'
+        timeout-minutes: 10
+        env:
+          CI: true
+        run: |
+          echo "PLAYWRIGHT_WORKERS=2" >> "$GITHUB_ENV"
+          bun --cwd packages/app test:e2e:local e2e/regression/session-timeline-reasoning-projection.spec.ts --workers=1
 
       - name: Run app e2e tests
         run: bun --cwd packages/app test:e2e:local
