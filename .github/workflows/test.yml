@@ -84,8 +84,17 @@ jobs:
 
       - name: Run HttpApi exerciser gates
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         working-directory: packages/opencode
-        run: bun run test:httpapi
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" == "projetsjsl/opencode" ]]; then
+            export OPENCODE_MODELS_PATH="$GITHUB_WORKSPACE/packages/opencode/test/tool/fixtures/models-api.json"
+            export OPENCODE_DISABLE_MODELS_FETCH=true
+          fi
+          for mode in coverage auth effect; do
+            bun run script/httpapi-exercise.ts --mode "$mode" --fail-on-missing --fail-on-skip --progress --trace
+          done
 
   e2e:
     name: e2e (${{ matrix.settings.name }})
