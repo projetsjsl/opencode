@@ -2468,3 +2468,40 @@ noLLMServer.instance(
     }),
   30_000,
 )
+
+it.instance("compaction dispatch uses its own marker before a queued prompt", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "older work" }],
+    })
+    yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+    const marker = (yield* sessions.messages({ sessionID: chat.id })).at(-1)!
+    const queued = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "QUEUED_GO" }],
+    })
+    yield* llm.push(reply().text("summary").stop())
+    yield* llm.push(reply().text("queued result").stop())
+    yield* prompt.loop({ sessionID: chat.id })
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    const summary = messages.find((message) => message.info.role === "assistant" && message.info.summary)
+    expect(summary?.info.role).toBe("assistant")
+    if (summary?.info.role === "assistant") expect(summary.info.parentID).toBe(marker.info.id)
+    expect(messages.filter((message) => message.info.role === "user")).toHaveLength(3)
+    const last = messages.at(-1)!
+    if (last.info.role === "assistant") expect(last.info.parentID).toBe(queued.info.id)
+    expect(yield* llm.hits).toHaveLength(2)
+  }),
+)

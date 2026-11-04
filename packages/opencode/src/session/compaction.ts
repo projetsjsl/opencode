@@ -329,8 +329,15 @@ const layer = Layer.effect(
       }
       const userMessage = parent.info
       const compactionPart = parent.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction")
+      if (!compactionPart) {
+        throw new Error(`Compaction parent must contain a compaction part: ${input.parentID}`)
+      }
 
-      let messages = input.messages
+      // Inputs admitted after this marker belong to the next provider turn.
+      // They must not become part of the summary or a forward tail_start_id.
+      const boundary = input.messages.findIndex((m) => m.info.id === input.parentID)
+      const pending = input.messages.slice(0, boundary + 1)
+      let messages = pending
       let replay:
         | {
             info: SessionV1.User
@@ -338,12 +345,11 @@ const layer = Layer.effect(
           }
         | undefined
       if (input.overflow) {
-        const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
-        for (let i = idx - 1; i >= 0; i--) {
-          const msg = input.messages[i]
+        for (let i = pending.length - 2; i >= 0; i--) {
+          const msg = pending[i]
           if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction")) {
             replay = { info: msg.info, parts: msg.parts }
-            messages = input.messages.slice(0, i)
+            messages = pending.slice(0, i)
             break
           }
         }
@@ -351,7 +357,7 @@ const layer = Layer.effect(
           replay && messages.some((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
         if (!hasContent) {
           replay = undefined
-          messages = input.messages
+          messages = pending
         }
       }
 
@@ -375,7 +381,10 @@ const layer = Layer.effect(
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const msgs = structuredClone(selected.head)
+      // Keep the overflowed request in the summary as text/attachment labels.
+      // If real input arrives during compaction, it replaces the synthetic
+      // replay, but the original request must remain represented in context.
+      const msgs = structuredClone(replay ? [...selected.head, replay] : selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
       const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const nextPrompt =
@@ -465,7 +474,12 @@ const layer = Layer.effect(
         })
       }
 
-      if (result === "continue" && input.auto) {
+      const queued =
+        result === "continue" &&
+        input.auto &&
+        MessageV2.latest(yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).user?.id !==
+          userMessage.id
+      if (result === "continue" && input.auto && !queued) {
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
