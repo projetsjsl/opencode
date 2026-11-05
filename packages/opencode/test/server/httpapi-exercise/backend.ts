@@ -1,6 +1,7 @@
 import { ConfigProvider, Effect, Layer } from "effect"
 import { HttpRouter } from "effect/unstable/http"
 import { parse } from "./assertions"
+import { toAuthProbeRequest } from "./auth-probe"
 import { runtime, type Runtime } from "./runtime"
 import type { ActiveScenario, BackendApp, CallResult, CaptureMode, SeededContext } from "./types"
 
@@ -12,31 +13,47 @@ type CallOptions = {
 }
 
 export function call(scenario: ActiveScenario, ctx: SeededContext<unknown>, options: CallOptions = {}) {
-  return Effect.promise(async () =>
-    capture(await app(await runtime(), options).request(toRequest(scenario, ctx)), scenario.capture),
-  )
+  return Effect.promise(async () => {
+    const modules = await runtime()
+    return capture(
+      await app(modules, options).request(toRequest(scenario, ctx, modules.exerciseDirectory)),
+      scenario.capture,
+    )
+  })
 }
 
 export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" | "valid" = "missing") {
   return Effect.promise(async () => {
+    const modules = await runtime()
+    if (credentials === "valid" && scenario.method === "GET" && scenario.path === "/tui/control/next") {
+      modules.Tui.submitTuiRequest({ path: "/tui/auth-probe", body: {} })
+    }
     const controller = new AbortController()
-    return Promise.race([
-      Promise.resolve(
-        app(await runtime(), { auth: { password: "secret" } }).request(
-          toAuthProbeRequest(scenario, credentials, controller.signal),
-        ),
-      ).then((response) => capture(response, scenario.capture)),
-      Bun.sleep(1_000).then(() => {
-        controller.abort("auth probe timed out")
-        return {
-          status: 0,
-          contentType: "",
-          text: "auth probe timed out",
-          body: undefined,
-          timedOut: true,
-        }
-      }),
-    ])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        Promise.resolve(
+          app(modules, { auth: { password: "secret" } }).request(
+            toAuthProbeRequest(scenario, credentials, controller.signal, modules.exerciseDirectory),
+          ),
+        ).then((response) => capture(response, scenario.capture)),
+        new Promise<CallResult>((resolve) => {
+          timer = setTimeout(() => {
+            controller.abort("auth probe timed out")
+            resolve({
+              status: 0,
+              contentType: "",
+              text: "auth probe timed out",
+              body: undefined,
+              timedOut: true,
+            })
+          }, 1_000)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      controller.abort("auth probe complete")
+    }
   })
 }
 
@@ -77,41 +94,17 @@ function app(modules: Runtime, options: CallOptions) {
   })
 }
 
-function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>) {
+function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>, directory: string) {
   const spec = scenario.request(ctx, ctx.state)
   return new Request(new URL(spec.path, "http://localhost"), {
     method: scenario.method,
-    headers: spec.body === undefined ? spec.headers : { "content-type": "application/json", ...spec.headers },
+    headers: {
+      "x-opencode-directory": directory,
+      ...(spec.body === undefined ? {} : { "content-type": "application/json" }),
+      ...spec.headers,
+    },
     body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
   })
-}
-
-function toAuthProbeRequest(scenario: ActiveScenario, credentials: "missing" | "valid", signal: AbortSignal) {
-  const spec = scenario.authProbe ?? {
-    path: authProbePath(scenario.path),
-    body: scenario.method === "GET" ? undefined : {},
-  }
-  const headers = {
-    ...(spec.body === undefined ? {} : { "content-type": "application/json" }),
-    ...spec.headers,
-    ...(credentials === "valid" ? { authorization: basic("opencode", "secret") } : {}),
-  }
-  return new Request(new URL(spec.path, "http://localhost"), {
-    method: scenario.method,
-    headers,
-    body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
-    signal,
-  })
-}
-
-function basic(username: string, password: string) {
-  return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
-}
-
-function authProbePath(path: string) {
-  return path
-    .replace(/\{([^}]+)\}/g, (_match, key: string) => `auth_${key}`)
-    .replace(/:([^/]+)/g, (_match, key: string) => `auth_${key}`)
 }
 
 async function capture(response: Response, mode: CaptureMode): Promise<CallResult> {

@@ -1138,23 +1138,23 @@ const layer = Layer.effect(
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
           const task = tasks.pop()
-
-          if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
-            continue
-          }
 
           if (task?.type === "compaction") {
             const result = yield* compaction.process({
               messages: msgs,
-              parentID: lastUser.id,
+              parentID: task.messageID,
               sessionID,
               auto: task.auto,
               overflow: task.overflow,
             })
             if (result === "stop") break
+            continue
+          }
+
+          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          if (task?.type === "subtask") {
+            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
             continue
           }
 

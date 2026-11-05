@@ -282,6 +282,21 @@ function createSummaryCompaction(sessionID: SessionID) {
   return SessionCompaction.use.create({ sessionID, agent: "build", model: ref, auto: false })
 }
 
+function createCompactionMessage(sessionID: SessionID, text: string) {
+  return Effect.gen(function* () {
+    const ssn = yield* SessionNs.Service
+    const message = yield* createUserMessage(sessionID, text)
+    yield* ssn.updatePart({
+      id: PartID.ascending(),
+      messageID: message.id,
+      sessionID,
+      type: "compaction",
+      auto: false,
+    })
+    return message
+  })
+}
+
 function readCompactionPart(sessionID: SessionID) {
   return SessionNs.use
     .messages({ sessionID })
@@ -813,12 +828,128 @@ describe("session.compaction.prune", () => {
 
 describe("session.compaction.process", () => {
   it.instance(
+    "rejects an ordinary queued user as a compaction parent before writing a summary",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      const queued = yield* createUserMessage(session.id, "go")
+      const messages = yield* ssn.messages({ sessionID: session.id })
+      const result = yield* Effect.exit(
+        SessionCompaction.use.process({
+          parentID: queued.id,
+          messages,
+          sessionID: session.id,
+          auto: true,
+        }),
+      )
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result))
+        expect(String(Cause.squash(result.cause))).toContain("Compaction parent must contain a compaction part")
+      expect(yield* ssn.messages({ sessionID: session.id })).toEqual(messages)
+    }),
+  )
+
+  itCompaction.instance(
+    "bounds compaction before its marker and preserves queued input without a synthetic followup",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(reply("summary", (input) => (captured = JSON.stringify(input.messages))))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const old = yield* createUserMessage(session.id, "older work")
+        yield* createAssistantMessage(session.id, old.id, test.directory)
+        const tail = yield* createUserMessage(session.id, "recent work")
+        const tailReply = yield* createAssistantMessage(session.id, tail.id, test.directory)
+        yield* createSummaryCompaction(session.id)
+        const marker = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
+        const queued = yield* createUserMessage(session.id, "QUEUED_GO_UNSUMMARIZED")
+        const messages = yield* ssn.messages({ sessionID: session.id })
+        const before = messages.filter((message) => message.info.id !== marker.info.id)
+        yield* SessionCompaction.use.process({
+          parentID: marker.info.id,
+          messages,
+          sessionID: session.id,
+          auto: true,
+        })
+        const all = yield* ssn.messages({ sessionID: session.id })
+        const summary = all.find((message) => message.info.role === "assistant" && message.info.summary)!
+        const compacted = all.find((message) => message.info.id === marker.info.id)!
+        const part = compacted.parts.find((part) => part.type === "compaction")
+        expect(part?.tail_start_id).toBe(tail.id)
+        expect(captured).not.toContain("QUEUED_GO_UNSUMMARIZED")
+        expect(all).toHaveLength(7)
+        expect(all.filter((message) => before.some((item) => item.info.id === message.info.id))).toEqual(before)
+        const filtered = MessageV2.filterCompacted([...all].reverse())
+        expect(filtered.map((message) => message.info.id)).toEqual([
+          marker.info.id,
+          summary.info.id,
+          tail.id,
+          tailReply.id,
+          queued.id,
+        ])
+        expect(MessageV2.latest(filtered).user?.id).toBe(queued.id)
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 10_000 }) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "preserves an overflow request when input arrives while the summary is running",
+    () => {
+      const stub = llm()
+      let captured = ""
+      let queued: MessageID | undefined
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        stub.push((input) =>
+          Stream.fromEffect(
+            Effect.gen(function* () {
+              captured = JSON.stringify(input.messages)
+              queued = (yield* createUserMessage(SessionID.make(input.sessionID), "LATE_QUEUED_GO")).id
+            }),
+          ).pipe(
+            Stream.provideService(SessionNs.Service, ssn),
+            Stream.flatMap(() => reply("summary")(input)),
+          ),
+        )
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        yield* createUserMessage(session.id, "ORIGINAL_PENDING_REQUEST")
+        yield* createSummaryCompaction(session.id)
+        const messages = yield* ssn.messages({ sessionID: session.id })
+        yield* SessionCompaction.use.process({
+          parentID: messages.at(-1)!.info.id,
+          messages,
+          sessionID: session.id,
+          auto: true,
+          overflow: true,
+        })
+        const all = yield* ssn.messages({ sessionID: session.id })
+        expect(captured).toContain("ORIGINAL_PENDING_REQUEST")
+        expect(captured).not.toContain("LATE_QUEUED_GO")
+        expect(all).toHaveLength(5)
+        const filtered = MessageV2.filterCompacted([...all].reverse())
+        expect(MessageV2.latest(filtered).user?.id).toBe(queued)
+        expect(filtered.at(-1)?.info.id).toBe(queued)
+        expect(filtered).toHaveLength(3)
+        expect(all.flatMap((message) => message.parts).some((part) => part.type === "text" && part.synthetic)).toBe(
+          false,
+        )
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 0 }) }))
+    },
+    { git: true },
+  )
+
+  it.instance(
     "throws when parent is not a user message",
     Effect.gen(function* () {
       const test = yield* TestInstance
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
-      const msg = yield* createUserMessage(session.id, "hello")
+      const msg = yield* createCompactionMessage(session.id, "hello")
       const reply = yield* createAssistantMessage(session.id, msg.id, test.directory)
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
@@ -848,7 +979,7 @@ describe("session.compaction.process", () => {
       const events = yield* EventV2Bridge.Service
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
-      const msg = yield* createUserMessage(session.id, "hello")
+      const msg = yield* createCompactionMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const done = yield* Deferred.make<void, Error>()
       const seen: string[] = []
@@ -881,7 +1012,7 @@ describe("session.compaction.process", () => {
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
-      const msg = yield* createUserMessage(session.id, "hello")
+      const msg = yield* createCompactionMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -909,7 +1040,7 @@ describe("session.compaction.process", () => {
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
-      const msg = yield* createUserMessage(session.id, "hello")
+      const msg = yield* createCompactionMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1107,7 +1238,7 @@ describe("session.compaction.process", () => {
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
-      const msg = yield* createUserMessage(session.id, "hello")
+      const msg = yield* createCompactionMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1150,7 +1281,7 @@ describe("session.compaction.process", () => {
         filename: "cat.png",
         url: "https://example.com/cat.png",
       })
-      const msg = yield* createUserMessage(session.id, "current")
+      const msg = yield* createCompactionMessage(session.id, "current")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1178,7 +1309,7 @@ describe("session.compaction.process", () => {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
       yield* createUserMessage(session.id, "earlier")
-      const msg = yield* createUserMessage(session.id, "current")
+      const msg = yield* createCompactionMessage(session.id, "current")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const result = yield* SessionCompaction.use.process({
@@ -1228,7 +1359,7 @@ describe("session.compaction.process", () => {
         const events = yield* EventV2Bridge.Service
         const ready = yield* Deferred.make<void>()
         const session = yield* ssn.create({})
-        const msg = yield* createUserMessage(session.id, "hello")
+        const msg = yield* createCompactionMessage(session.id, "hello")
         const msgs = yield* ssn.messages({ sessionID: session.id })
         const off = yield* events.listen((evt) => {
           if (evt.type !== SessionStatus.Event.Status.type) return Effect.void
@@ -1272,7 +1403,7 @@ describe("session.compaction.process", () => {
         return yield* Effect.gen(function* () {
           const ssn = yield* SessionNs.Service
           const session = yield* ssn.create({})
-          const msg = yield* createUserMessage(session.id, "hello")
+          const msg = yield* createCompactionMessage(session.id, "hello")
           const msgs = yield* ssn.messages({ sessionID: session.id })
           const fiber = yield* SessionCompaction.use
             .process({
@@ -1316,7 +1447,7 @@ describe("session.compaction.process", () => {
       return Effect.gen(function* () {
         const ssn = yield* SessionNs.Service
         const session = yield* ssn.create({})
-        const msg = yield* createUserMessage(session.id, "hello")
+        const msg = yield* createCompactionMessage(session.id, "hello")
         const msgs = yield* ssn.messages({ sessionID: session.id })
         yield* SessionCompaction.use.process({
           parentID: msg.id,
@@ -1357,7 +1488,7 @@ describe("session.compaction.process", () => {
       return Effect.gen(function* () {
         const ssn = yield* SessionNs.Service
         const session = yield* ssn.create({})
-        const msg = yield* createUserMessage(session.id, "hello")
+        const msg = yield* createCompactionMessage(session.id, "hello")
         const msgs = yield* ssn.messages({ sessionID: session.id })
         yield* SessionCompaction.use.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
 

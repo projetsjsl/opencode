@@ -29,9 +29,11 @@ jobs:
         settings:
           - name: linux
             host: blacksmith-4vcpu-ubuntu-2404
+            fork_host: ubuntu-24.04
           - name: windows
             host: blacksmith-4vcpu-windows-2025
-    runs-on: ${{ matrix.settings.host }}
+            fork_host: windows-2025
+    runs-on: ${{ github.repository == 'projetsjsl/opencode' && matrix.settings.fork_host || matrix.settings.host }}
     defaults:
       run:
         shell: bash
@@ -63,9 +65,34 @@ jobs:
             turbo-${{ runner.os }}-${{ hashFiles('turbo.json', '**/package.json') }}-
             turbo-${{ runner.os }}-
 
+      - name: Keep Windows path fixtures on the checkout drive
+        if: github.repository == 'projetsjsl/opencode' && runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $fixtureTemp = (Resolve-Path $env:RUNNER_TEMP).Path
+          $checkout = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          if ([IO.Path]::GetPathRoot($fixtureTemp) -ne [IO.Path]::GetPathRoot($checkout)) {
+            throw "Windows rooted-path fixtures require temp and checkout on the same drive"
+          }
+          foreach ($name in @('TEMP', 'TMP')) {
+            "$name=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+      - name: Provision native ripgrep on fork Windows runner
+        if: github.repository == 'projetsjsl/opencode' && runner.os == 'Windows'
+        timeout-minutes: 2
+        working-directory: packages/core
+        run: bun test test/ripgrep.test.ts --timeout 30000 --only-failures
+
       - name: Run unit tests
         timeout-minutes: 20
-        run: GITHUB_ACTIONS=false bun turbo test
+        run: |
+          if [[ "$GITHUB_REPOSITORY" == "projetsjsl/opencode" ]]; then
+            GITHUB_ACTIONS=false bun turbo test --log-order=stream
+          else
+            GITHUB_ACTIONS=false bun turbo test
+          fi
         env:
           OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
 
@@ -76,8 +103,17 @@ jobs:
 
       - name: Run HttpApi exerciser gates
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         working-directory: packages/opencode
-        run: bun run test:httpapi
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" == "projetsjsl/opencode" ]]; then
+            export OPENCODE_MODELS_PATH="$GITHUB_WORKSPACE/packages/opencode/test/tool/fixtures/models-api.json"
+            export OPENCODE_DISABLE_MODELS_FETCH=true
+          fi
+          for mode in coverage auth effect; do
+            bun run script/httpapi-exercise.ts --mode "$mode" --fail-on-missing --fail-on-skip --progress --trace
+          done
 
   e2e:
     name: e2e (${{ matrix.settings.name }})
@@ -87,9 +123,11 @@ jobs:
         settings:
           - name: linux
             host: blacksmith-4vcpu-ubuntu-2404
+            fork_host: ubuntu-24.04
           - name: windows
             host: blacksmith-4vcpu-windows-2025
-    runs-on: ${{ matrix.settings.host }}
+            fork_host: windows-2025
+    runs-on: ${{ github.repository == 'projetsjsl/opencode' && matrix.settings.fork_host || matrix.settings.host }}
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
     defaults:
@@ -132,6 +170,15 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: packages/app
         run: bunx playwright install chromium
+
+      - name: Qualify Windows timeline fixture before full suite
+        if: github.repository == 'projetsjsl/opencode' && runner.os == 'Windows'
+        timeout-minutes: 10
+        env:
+          CI: true
+        run: |
+          echo "PLAYWRIGHT_WORKERS=2" >> "$GITHUB_ENV"
+          bun --cwd packages/app test:e2e:local e2e/regression/session-timeline-reasoning-projection.spec.ts --workers=1
 
       - name: Run app e2e tests
         run: bun --cwd packages/app test:e2e:local
