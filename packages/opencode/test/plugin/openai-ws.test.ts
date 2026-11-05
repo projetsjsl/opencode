@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { EventEmitter } from "node:events"
 import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http"
 import net, { type AddressInfo, type Socket } from "node:net"
@@ -564,23 +564,36 @@ describe("plugin.openai.ws-pool", () => {
       connections += 1
       socket.once("message", () => {})
     })
-    const fetch = OpenAIWebSocketPool.createWebSocketFetch({
-      url: server.url,
-      idleTimeout: 500,
-      streamRetries: 1,
-    })
+    const interval = globalThis.setInterval
+    let prune: (() => void) | undefined
+    const capture = spyOn(globalThis, "setInterval").mockImplementation(interval)
+    let fetch: ReturnType<typeof OpenAIWebSocketPool.createWebSocketFetch>
+    try {
+      fetch = OpenAIWebSocketPool.createWebSocketFetch({
+        url: server.url,
+        idleTimeout: 500,
+        streamRetries: 1,
+      })
+      const callback = capture.mock.calls.find(([, milliseconds]) => milliseconds === 500)?.[0]
+      if (typeof callback === "function") prune = () => callback(undefined)
+    } finally {
+      capture.mockRestore()
+    }
 
-    await new Promise((resolve) => setTimeout(resolve, 250))
-    const first = await fetch(server.url, streamRequest())
-    expect((await readTextError(first.text())).message).toContain("idle timeout waiting for websocket")
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    try {
+      const first = await fetch(server.url, streamRequest())
+      expect((await readTextError(first.text())).message).toContain("idle timeout waiting for websocket")
+      expect(prune).toBeDefined()
+      prune!()
 
-    const second = await fetch(server.url, streamRequest())
+      const second = await fetch(server.url, streamRequest())
 
-    expect(await second.text()).toBe("http")
-    expect(connections).toBe(2)
-    expect(server.httpRequests).toHaveLength(1)
-    fetch.close()
+      expect(await second.text()).toBe("http")
+      expect(connections).toBe(2)
+      expect(server.httpRequests).toHaveLength(1)
+    } finally {
+      fetch.close()
+    }
   })
 
   test("retries failed websocket streams before using HTTP fallback", async () => {
