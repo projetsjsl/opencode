@@ -22,6 +22,18 @@ def guard(condition, code):
         raise DiagnosticGuardError(code)
 
 
+def parse_environment(log):
+    markers = [line.removeprefix("FILE_SEARCH_ENV ") for line in log.splitlines() if line.startswith("FILE_SEARCH_ENV ")]
+    guard(len(markers) == 1, "environment_marker_not_unique")
+    value = json.loads(markers[0])
+    guard(isinstance(value, dict), "environment_marker_invalid")
+    guard(value.get("backend") in ("ripgrep", "fff"), "effective_backend_unobserved")
+    guard(type(value.get("effectiveDisableFFF")) is bool, "effective_flag_unobserved")
+    guard(value.get("availableAtSelection") is None or type(value["availableAtSelection"]) is bool, "availability_invalid")
+    guard(all(isinstance(value.get(key), str) and value[key] for key in ("coreModule", "effectModule", "home", "tmp")), "environment_paths_unobserved")
+    return value
+
+
 def save():
     (REPORT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
 
@@ -110,7 +122,7 @@ def run_case(label, tree, backend):
     env.pop("OPENCODE_DISABLE_FFF", None)
     env["OPENCODE_DISABLE_FFF"] = "1" if backend == "ripgrep" else "0"
     logfile = REPORT / (key + ".log")
-    result = {"label": label, "backend": backend, "log": str(logfile), "timeout": False}
+    result = {"label": label, "requested_backend": backend, "log": str(logfile), "timeout": False}
     report["cases"].append(result)
     save()
     with logfile.open("wb") as log:
@@ -145,9 +157,13 @@ def run_case(label, tree, backend):
             result["rc"] = process.returncode
             result["parent_reaped"] = process.poll() is not None
             save()
+    output = logfile.read_text(errors="replace")
+    environment = parse_environment(output)
+    result["effective_backend"] = environment["backend"]
+    result["environment"] = environment
     save()
     print(json.dumps(result), flush=True)
-    print(logfile.read_text(errors="replace"), flush=True)
+    print(output, flush=True)
     if result["timeout"]:
         raise DiagnosticGuardError("probe_timeout")
     return result["rc"]

@@ -33,7 +33,7 @@ jobs:
         timeout-minutes: 5
         env:
           OPENCODE_SEARCH_REPORT_DIR: ${{ runner.temp }}/opencode-search-${{ github.run_id }}-${{ github.run_attempt }}
-        run: python script/diagnose_file_search.py
+        run: python -I script/diagnose_file_search.py
       - name: Preserve diagnostic results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
