@@ -95,6 +95,13 @@ diagnosticSpyOn(diagnosticFff, "available").mockImplementation(() => {
   return value
 })
 let diagnosticLast: unknown
+const diagnosticInitializations: { ok: boolean; error?: string; basePath: string }[] = []
+const diagnosticOriginalCreate = diagnosticFff.create
+diagnosticSpyOn(diagnosticFff, "create").mockImplementation((options) => {
+  const result = diagnosticOriginalCreate(options)
+  diagnosticInitializations.push({ ok: result.ok, ...(!result.ok ? { error: result.error } : {}), basePath: options.basePath })
+  return result
+})
 '''
     text = observer + text
     poll = '          const body = await response.json()\n          return body.includes("hello.txt")'
@@ -102,8 +109,8 @@ let diagnosticLast: unknown
     text = text.replace(poll, '          const body = await response.json()\n          diagnosticLast = { status: response.status, body }\n          return body.includes("hello.txt")')
     hook = "afterEach(async () => {\n"
     guard(text.count(hook) == 1, "cleanup_shape_changed")
-    text = text.replace(hook, hook + '  console.log("FILE_SEARCH_RESULT", JSON.stringify(diagnosticLast))\n'
-                        + '  console.log("FILE_SEARCH_ENV", JSON.stringify({ disableFFF: process.env.OPENCODE_DISABLE_FFF ?? null, effectiveDisableFFF: diagnosticFlag.OPENCODE_DISABLE_FFF, availableAtSelection: diagnosticAvailable, backend: diagnosticFlag.OPENCODE_DISABLE_FFF || diagnosticAvailable === false ? "ripgrep" : diagnosticAvailable === true ? "fff" : "unobserved", coreModule: Bun.resolveSync("@opencode-ai/core/fs-util", import.meta.dir), effectModule: Bun.resolveSync("effect", import.meta.dir), home: process.env.OPENCODE_TEST_HOME, tmp: process.env.TMPDIR }))\n')
+    text = text.replace(hook, hook + '  if (diagnosticLast !== undefined) {\n  console.log("FILE_SEARCH_RESULT", JSON.stringify(diagnosticLast))\n'
+                        + '  console.log("FILE_SEARCH_ENV", JSON.stringify({ disableFFF: process.env.OPENCODE_DISABLE_FFF ?? null, effectiveDisableFFF: diagnosticFlag.OPENCODE_DISABLE_FFF, availableAtSelection: diagnosticAvailable, initializations: diagnosticInitializations, backend: diagnosticFlag.OPENCODE_DISABLE_FFF || diagnosticAvailable === false ? "ripgrep" : diagnosticAvailable === true ? "fff" : "unobserved", coreModule: Bun.resolveSync("@opencode-ai/core/fs-util", import.meta.dir), effectModule: Bun.resolveSync("effect", import.meta.dir), home: process.env.OPENCODE_TEST_HOME, tmp: process.env.TMPDIR }))\n  diagnosticLast = undefined\n  }\n')
     guard(text.count("expect(") == original_test.count("expect("), "assertion_count_changed")
     test.write_text(text)
     preload = package / "test/preload.ts"
@@ -145,13 +152,13 @@ def run_case(label, tree, backend):
     env.pop("OPENCODE_DISABLE_FFF", None)
     env["OPENCODE_DISABLE_FFF"] = "1" if backend == "ripgrep" else "0"
     logfile = REPORT / (key + ".log")
-    result = {"label": label, "requested_backend": backend, "log": str(logfile), "timeout": False}
+    result = {"label": label, "requested_backend": backend, "log": str(logfile), "timeout": False, "case_scope": "whole-file"}
     report["cases"].append(result)
     save()
     with logfile.open("wb") as log:
         options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         process = subprocess.Popen([shutil.which("bun"), "test", "test/server/httpapi-file.test.ts",
-                                    "--test-name-pattern", "serves search endpoints", "--timeout", "30000", "--only-failures"],
+                                    "--timeout", "30000", "--only-failures"],
                                    cwd=tree / "packages/opencode", env=env, stdout=log, stderr=subprocess.STDOUT, **options)
         result["pid"] = process.pid
         try:
