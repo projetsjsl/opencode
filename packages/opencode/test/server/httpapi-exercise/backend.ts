@@ -20,24 +20,36 @@ export function call(scenario: ActiveScenario, ctx: SeededContext<unknown>, opti
 
 export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" | "valid" = "missing") {
   return Effect.promise(async () => {
+    const modules = await runtime()
+    if (credentials === "valid" && scenario.method === "GET" && scenario.path === "/tui/control/next") {
+      modules.Tui.submitTuiRequest({ path: "/tui/auth-probe", body: {} })
+    }
     const controller = new AbortController()
-    return Promise.race([
-      Promise.resolve(
-        app(await runtime(), { auth: { password: "secret" } }).request(
-          toAuthProbeRequest(scenario, credentials, controller.signal),
-        ),
-      ).then((response) => capture(response, scenario.capture)),
-      Bun.sleep(1_000).then(() => {
-        controller.abort("auth probe timed out")
-        return {
-          status: 0,
-          contentType: "",
-          text: "auth probe timed out",
-          body: undefined,
-          timedOut: true,
-        }
-      }),
-    ])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        Promise.resolve(
+          app(modules, { auth: { password: "secret" } }).request(
+            toAuthProbeRequest(scenario, credentials, controller.signal),
+          ),
+        ).then((response) => capture(response, scenario.capture)),
+        new Promise<CallResult>((resolve) => {
+          timer = setTimeout(() => {
+            controller.abort("auth probe timed out")
+            resolve({
+              status: 0,
+              contentType: "",
+              text: "auth probe timed out",
+              body: undefined,
+              timedOut: true,
+            })
+          }, 1_000)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      controller.abort("auth probe complete")
+    }
   })
 }
 
