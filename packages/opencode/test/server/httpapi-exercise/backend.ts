@@ -1,6 +1,7 @@
 import { ConfigProvider, Effect, Layer } from "effect"
 import { HttpRouter } from "effect/unstable/http"
 import { parse } from "./assertions"
+import { toAuthProbeRequest } from "./auth-probe"
 import { runtime, type Runtime } from "./runtime"
 import type { ActiveScenario, BackendApp, CallResult, CaptureMode, SeededContext } from "./types"
 
@@ -84,34 +85,6 @@ function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>) {
     headers: spec.body === undefined ? spec.headers : { "content-type": "application/json", ...spec.headers },
     body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
   })
-}
-
-function toAuthProbeRequest(scenario: ActiveScenario, credentials: "missing" | "valid", signal: AbortSignal) {
-  const spec = scenario.authProbe ?? {
-    path: authProbePath(scenario.path),
-    body: scenario.method === "GET" ? undefined : {},
-  }
-  const headers = {
-    ...(spec.body === undefined ? {} : { "content-type": "application/json" }),
-    ...spec.headers,
-    ...(credentials === "valid" ? { authorization: basic("opencode", "secret") } : {}),
-  }
-  return new Request(new URL(spec.path, "http://localhost"), {
-    method: scenario.method,
-    headers,
-    body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
-    signal,
-  })
-}
-
-function basic(username: string, password: string) {
-  return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
-}
-
-function authProbePath(path: string) {
-  return path
-    .replace(/\{([^}]+)\}/g, (_match, key: string) => `auth_${key}`)
-    .replace(/:([^/]+)/g, (_match, key: string) => `auth_${key}`)
 }
 
 async function capture(response: Response, mode: CaptureMode): Promise<CallResult> {
