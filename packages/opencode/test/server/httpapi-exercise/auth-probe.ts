@@ -4,6 +4,7 @@ export function toAuthProbeRequest(
   scenario: Pick<ActiveScenario, "method" | "path" | "authProbe">,
   credentials: "missing" | "valid",
   signal: AbortSignal,
+  directory?: string,
 ) {
   const spec = scenario.authProbe ?? {
     path: authProbePath(scenario.path),
@@ -13,6 +14,7 @@ export function toAuthProbeRequest(
   // Auth probes only need to reach decoding; effect scenarios exercise creation.
   const body = scenario.method === "POST" && ["/pty", "/api/pty"].includes(spec.path) ? { command: 1 } : spec.body
   const headers = {
+    ...(directory === undefined ? {} : { "x-opencode-directory": directory }),
     ...(body === undefined ? {} : { "content-type": "application/json" }),
     ...spec.headers,
     ...(credentials === "valid" ? { authorization: basic("opencode", "secret") } : {}),

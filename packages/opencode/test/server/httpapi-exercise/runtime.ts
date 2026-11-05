@@ -1,4 +1,7 @@
+import { prepareExercisePaths } from "./environment"
+
 export type Runtime = {
+  exerciseDirectory: string
   PublicApi: (typeof import("../../../src/server/routes/instance/httpapi/public"))["PublicApi"]
   HttpApiApp: (typeof import("../../../src/server/routes/instance/httpapi/server"))["HttpApiApp"]
   AppLayer: (typeof import("../../../src/effect/app-runtime"))["AppLayer"]
@@ -19,6 +22,7 @@ let runtimePromise: Promise<Runtime> | undefined
 
 export function runtime() {
   return (runtimePromise ??= (async () => {
+    const fixturePaths = await prepareExercisePaths()
     const publicApi = await import("../../../src/server/routes/instance/httpapi/public")
     const httpApiServer = await import("../../../src/server/routes/instance/httpapi/server")
     const appRuntime = await import("../../../src/effect/app-runtime")
@@ -33,6 +37,7 @@ export function runtime() {
     const fixture = await import("../../fixture/fixture")
     const db = await import("../../fixture/db")
     return {
+      exerciseDirectory: fixturePaths.directory,
       PublicApi: publicApi.PublicApi,
       HttpApiApp: httpApiServer.HttpApiApp,
       AppLayer: appRuntime.AppLayer,

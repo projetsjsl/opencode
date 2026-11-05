@@ -52,3 +52,16 @@ test("read-only probes keep an empty body", () => {
   const request = toAuthProbeRequest(scenario("/pty", "GET"), "missing", new AbortController().signal)
   expect(request.body).toBeNull()
 })
+
+test("auth probes use the isolated project and preserve explicit scenario directories", () => {
+  const controller = new AbortController()
+  const plain = toAuthProbeRequest(scenario("/experimental/tool/ids", "GET"), "valid", controller.signal, "/fixture")
+  expect(plain.headers.get("x-opencode-directory")).toBe("/fixture")
+  const explicit = toAuthProbeRequest(
+    scenario("/path", "GET", { path: "/path", headers: { "x-opencode-directory": "/scenario" } }),
+    "valid",
+    controller.signal,
+    "/fixture",
+  )
+  expect(explicit.headers.get("x-opencode-directory")).toBe("/scenario")
+})

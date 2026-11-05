@@ -13,9 +13,13 @@ type CallOptions = {
 }
 
 export function call(scenario: ActiveScenario, ctx: SeededContext<unknown>, options: CallOptions = {}) {
-  return Effect.promise(async () =>
-    capture(await app(await runtime(), options).request(toRequest(scenario, ctx)), scenario.capture),
-  )
+  return Effect.promise(async () => {
+    const modules = await runtime()
+    return capture(
+      await app(modules, options).request(toRequest(scenario, ctx, modules.exerciseDirectory)),
+      scenario.capture,
+    )
+  })
 }
 
 export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" | "valid" = "missing") {
@@ -30,7 +34,7 @@ export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" |
       return await Promise.race([
         Promise.resolve(
           app(modules, { auth: { password: "secret" } }).request(
-            toAuthProbeRequest(scenario, credentials, controller.signal),
+            toAuthProbeRequest(scenario, credentials, controller.signal, modules.exerciseDirectory),
           ),
         ).then((response) => capture(response, scenario.capture)),
         new Promise<CallResult>((resolve) => {
@@ -90,11 +94,15 @@ function app(modules: Runtime, options: CallOptions) {
   })
 }
 
-function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>) {
+function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>, directory: string) {
   const spec = scenario.request(ctx, ctx.state)
   return new Request(new URL(spec.path, "http://localhost"), {
     method: scenario.method,
-    headers: spec.body === undefined ? spec.headers : { "content-type": "application/json", ...spec.headers },
+    headers: {
+      "x-opencode-directory": directory,
+      ...(spec.body === undefined ? {} : { "content-type": "application/json" }),
+      ...spec.headers,
+    },
     body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
   })
 }
