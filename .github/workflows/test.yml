@@ -65,6 +65,20 @@ jobs:
             turbo-${{ runner.os }}-${{ hashFiles('turbo.json', '**/package.json') }}-
             turbo-${{ runner.os }}-
 
+      - name: Keep Windows path fixtures on the checkout drive
+        if: github.repository == 'projetsjsl/opencode' && runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $fixtureTemp = (Resolve-Path $env:RUNNER_TEMP).Path
+          $checkout = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          if ([IO.Path]::GetPathRoot($fixtureTemp) -ne [IO.Path]::GetPathRoot($checkout)) {
+            throw "Windows rooted-path fixtures require temp and checkout on the same drive"
+          }
+          foreach ($name in @('TEMP', 'TMP')) {
+            "$name=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
       - name: Provision native ripgrep on fork Windows runner
         if: github.repository == 'projetsjsl/opencode' && runner.os == 'Windows'
         timeout-minutes: 2
