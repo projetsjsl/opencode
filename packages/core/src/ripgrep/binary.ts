@@ -1,5 +1,5 @@
 import path from "path"
-import { Context, Effect, Layer, Stream } from "effect"
+import { Cache, Cause, Context, Duration, Effect, Exit, Layer, Stream } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -88,8 +88,8 @@ export namespace RipgrepBinary {
         if (process.platform !== "win32") yield* fs.chmod(target, 0o755)
       }, Effect.scoped)
 
-      return Service.of({
-        filepath: yield* Effect.cached(
+      const lookup = yield* Cache.makeWith(
+        (_: undefined) =>
           Effect.gen(function* () {
             const system = yield* Effect.sync(() => which(process.platform === "win32" ? "rg.exe" : "rg"))
             if (system && (yield* fs.isFile(system).pipe(Effect.orDie))) return system
@@ -119,8 +119,13 @@ export namespace RipgrepBinary {
             yield* fs.remove(archive, { force: true }).pipe(Effect.ignore)
             return target
           }),
-        ),
-      })
+        {
+          capacity: 1,
+          timeToLive: (exit) =>
+            Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) ? Duration.zero : Duration.infinity,
+        },
+      )
+      return Service.of({ filepath: Cache.get(lookup, undefined) })
     }),
   )
 
