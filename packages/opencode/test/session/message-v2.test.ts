@@ -1801,6 +1801,35 @@ describe("session.message-v2.latest", () => {
     ] as SessionV1.Part[],
   }
 
+  test("keeps a queued prompt after the summary and retained tail in a seven-message history", () => {
+    const oldUser: SessionV1.WithParts = { info: userInfo("msg_000_old"), parts: [] }
+    const oldReply: SessionV1.WithParts = {
+      info: assistantInfo("msg_000_reply", oldUser.info.id),
+      parts: [],
+    }
+    const queued: SessionV1.WithParts = {
+      info: { ...userInfo(CONTINUE_USER), time: { created: 6 } },
+      parts: [{ ...basePart(CONTINUE_USER, "queued"), type: "text", text: "queued go" }],
+    }
+    const summary: SessionV1.WithParts = {
+      ...summaryAssistant,
+      info: { ...summaryAssistant.info, time: { created: 7 } },
+    }
+    const original = [oldUser, oldReply, tailUser, overflowAssistant, compactionUser, queued, summary]
+    const before = JSON.stringify(original)
+    const filtered = MessageV2.filterCompacted([...original].reverse())
+    expect(filtered.map((message) => message.info.id)).toEqual([
+      COMPACTION_USER,
+      SUMMARY_ASSISTANT,
+      TAIL_USER,
+      OVERFLOW_ASSISTANT,
+      CONTINUE_USER,
+    ])
+    expect(filtered.at(-1)).toEqual(queued)
+    expect(MessageV2.latest(filtered).user?.id).toBe(queued.info.id)
+    expect(JSON.stringify(original)).toBe(before)
+  })
+
   test("selects latest messages by creation time when IDs are nonmonotonic", () => {
     const oldUser = { ...userInfo("msg_z_user"), time: { created: 100 } }
     const newUser = { ...userInfo("msg_a_user"), time: { created: 200 } }

@@ -1744,7 +1744,18 @@ const llmScenarios = new Set([
 ])
 
 const main = Effect.gen(function* () {
-  yield* Effect.addFinalizer(() => Effect.promise(() => disposeApps()).pipe(Effect.andThen(cleanupExercisePaths)))
+  const phase = (message: string) =>
+    Effect.sync(() => {
+      if (Bun.argv.includes("--trace")) console.log(`[trace] harness: ${message}`)
+    })
+  yield* Effect.addFinalizer(() =>
+    phase("disposeApps start").pipe(
+      Effect.andThen(Effect.promise(() => disposeApps())),
+      Effect.andThen(phase("disposeApps done; cleanupExercisePaths start")),
+      Effect.andThen(cleanupExercisePaths),
+      Effect.andThen(phase("cleanupExercisePaths done")),
+    ),
+  )
   const options = parseOptions(Bun.argv.slice(2))
   const modules = yield* Effect.promise(() => runtime())
   const effectRoutes = routeKeys(OpenApi.fromApi(modules.PublicApi))
@@ -1783,6 +1794,7 @@ const main = Effect.gen(function* () {
     return yield* Effect.fail(new Error("one or more scenarios are skipped"))
   if (options.failOnMissing && missing.length > 0)
     return yield* Effect.fail(new Error("one or more routes have no scenario"))
+  yield* phase("scenarios complete; leaving main scope")
   return undefined
 })
 

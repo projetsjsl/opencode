@@ -129,7 +129,7 @@ const forms = (dir: string) => {
   if (process.platform !== "win32") return [dir]
   const full = Filesystem.normalizePath(dir)
   const slash = full.replaceAll("\\", "/")
-  const root = slash.replace(/^[A-Za-z]:/, "")
+  const root = slash.replace(/^([A-Za-z]):/, "/$1")
   return Array.from(new Set([full, slash, root, root.toLowerCase()]))
 }
 
@@ -440,7 +440,7 @@ describe("tool.shell permissions", () => {
                 expect(
                   yield* fail(
                     {
-                      command: 'Get-Content "C:../outside.txt"',
+                      command: `Get-Content "${path.parse(tmp).root.slice(0, 2)}../outside.txt"`,
                     },
                     capture(requests, err),
                   ),
