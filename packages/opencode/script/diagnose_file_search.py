@@ -12,7 +12,7 @@ import tempfile
 import time
 
 BASE = "148842ef7cb1bc34192b3fff57d0f9721ab9c801"
-TARGET = "9c800d4988fe489a288a76a62430da2ad2b3c635"
+TARGET = "f0ebceb70d10904f2d5e574e50306711f2724500"
 class DiagnosticGuardError(RuntimeError):
     pass
 
@@ -30,8 +30,14 @@ def parse_environment(log):
     guard(value.get("backend") in ("ripgrep", "fff"), "effective_backend_unobserved")
     guard(type(value.get("effectiveDisableFFF")) is bool, "effective_flag_unobserved")
     guard(value.get("availableAtSelection") is None or type(value["availableAtSelection"]) is bool, "availability_invalid")
-    guard(all(isinstance(value.get(key), str) and value[key] for key in ("coreModule", "effectModule", "home", "tmp")), "environment_paths_unobserved")
+    guard(all(isinstance(value.get(key), str) and value[key] for key in ("coreModule", "binaryModule", "binarySHA256", "effectModule", "home", "tmp")), "environment_paths_unobserved")
     return value
+
+
+def verify_binary(tree, environment):
+    expected = tree / "packages/core/src/ripgrep/binary.ts"
+    guard(pathlib.Path(environment["binaryModule"]).resolve() == expected.resolve(), "unexpected_binary_module")
+    guard(environment["binarySHA256"] == hashlib.sha256(expected.read_bytes()).hexdigest(), "binary_source_mismatch")
 
 
 def save():
@@ -84,7 +90,9 @@ def instrument(tree, original_test):
     guard(text.count(opening) == 1, "native_case_shape_changed")
     fixture = '{ path: ' + json.dumps(str(FIXTURE)) + ', [Symbol.asyncDispose]: async () => {} }'
     text = text.replace(opening, 'test("serves search endpoints", async () => {\n    await using tmp = ' + fixture)
-    observer = '''import { spyOn as diagnosticSpyOn } from "bun:test"
+    observer = '''import { readFileSync as diagnosticReadFileSync } from "node:fs"
+import { createHash as diagnosticCreateHash } from "node:crypto"
+import { spyOn as diagnosticSpyOn } from "bun:test"
 import { Fff as diagnosticFff } from "@opencode-ai/core/filesystem/fff.bun"
 import { Flag as diagnosticFlag } from "@opencode-ai/core/flag/flag"
 let diagnosticAvailable: boolean | null = null
@@ -110,7 +118,7 @@ diagnosticSpyOn(diagnosticFff, "create").mockImplementation((options) => {
     hook = "afterEach(async () => {\n"
     guard(text.count(hook) == 1, "cleanup_shape_changed")
     text = text.replace(hook, hook + '  if (diagnosticLast !== undefined) {\n  console.log("FILE_SEARCH_RESULT", JSON.stringify(diagnosticLast))\n'
-                        + '  console.log("FILE_SEARCH_ENV", JSON.stringify({ disableFFF: process.env.OPENCODE_DISABLE_FFF ?? null, effectiveDisableFFF: diagnosticFlag.OPENCODE_DISABLE_FFF, availableAtSelection: diagnosticAvailable, initializations: diagnosticInitializations, backend: diagnosticFlag.OPENCODE_DISABLE_FFF || diagnosticAvailable === false ? "ripgrep" : diagnosticAvailable === true ? "fff" : "unobserved", coreModule: Bun.resolveSync("@opencode-ai/core/fs-util", import.meta.dir), effectModule: Bun.resolveSync("effect", import.meta.dir), home: process.env.OPENCODE_TEST_HOME, tmp: process.env.TMPDIR }))\n  diagnosticLast = undefined\n  }\n')
+                        + '  console.log("FILE_SEARCH_ENV", JSON.stringify({ disableFFF: process.env.OPENCODE_DISABLE_FFF ?? null, effectiveDisableFFF: diagnosticFlag.OPENCODE_DISABLE_FFF, availableAtSelection: diagnosticAvailable, initializations: diagnosticInitializations, backend: diagnosticFlag.OPENCODE_DISABLE_FFF || diagnosticAvailable === false ? "ripgrep" : diagnosticAvailable === true ? "fff" : "unobserved", coreModule: Bun.resolveSync("@opencode-ai/core/fs-util", import.meta.dir), binaryModule: Bun.resolveSync("@opencode-ai/core/ripgrep/binary", import.meta.dir), binarySHA256: diagnosticCreateHash("sha256").update(diagnosticReadFileSync(Bun.resolveSync("@opencode-ai/core/ripgrep/binary", import.meta.dir))).digest("hex"), effectModule: Bun.resolveSync("effect", import.meta.dir), home: process.env.OPENCODE_TEST_HOME, tmp: process.env.TMPDIR }))\n  diagnosticLast = undefined\n  }\n')
     guard(text.count("expect(") == original_test.count("expect("), "assertion_count_changed")
     test.write_text(text)
     preload = package / "test/preload.ts"
@@ -189,6 +197,7 @@ def run_case(label, tree, backend):
             save()
     output = logfile.read_text(errors="replace")
     environment = parse_environment(output)
+    verify_binary(tree, environment)
     result["effective_backend"] = environment["backend"]
     result["environment"] = environment
     save()
@@ -225,7 +234,10 @@ def main():
                 git("cat-file", "-e", revision + "^{commit}")
             except subprocess.CalledProcessError:
                 git("fetch", "--depth=1", "origin", revision)
-        guard(git("rev-parse", BASE + ":packages/core") == git("rev-parse", TARGET + ":packages/core") == git("rev-parse", "HEAD:packages/core"), "core_dependency_trees_differ")
+        guard(set(git("diff", "--name-only", BASE, TARGET, "--", "packages/core").splitlines()) == {
+            "packages/core/src/ripgrep/binary.ts", "packages/core/test/ripgrep-binary-interruption.test.ts"
+        }, "unexpected_core_dependency_changes")
+        guard(git("rev-parse", TARGET + ":packages/core") == git("rev-parse", "HEAD:packages/core"), "core_dependency_trees_differ")
         git("diff", "--exit-code", BASE, TARGET, "--", "bun.lock", "package.json", "packages/*/package.json")
         git("diff", "--exit-code", TARGET, "HEAD", "--", "packages/core", "bun.lock", "package.json", "packages/*/package.json")
         original = (ROOT / "packages/opencode/test/server/httpapi-file.test.ts").read_text()

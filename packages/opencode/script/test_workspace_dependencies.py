@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -12,6 +13,22 @@ SPEC.loader.exec_module(DIAG)
 
 
 class WorkspaceDependencyTests(unittest.TestCase):
+    def test_binary_proof_refuses_another_worktree_or_changed_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "expected"
+            binary = root / "packages/core/src/ripgrep/binary.ts"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("expected source")
+            environment = {"binaryModule": str(binary), "binarySHA256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+            DIAG.verify_binary(root, environment)
+            other = Path(tmp) / "another-binary.ts"
+            other.write_bytes(binary.read_bytes())
+            with self.assertRaisesRegex(DIAG.DiagnosticGuardError, "unexpected_binary_module"):
+                DIAG.verify_binary(root, {**environment, "binaryModule": str(other)})
+            binary.write_text("different source")
+            with self.assertRaisesRegex(DIAG.DiagnosticGuardError, "binary_source_mismatch"):
+                DIAG.verify_binary(root, environment)
+
     def test_native_sdk_import_fails_with_old_layout_and_resolves_with_declared_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "installed"
