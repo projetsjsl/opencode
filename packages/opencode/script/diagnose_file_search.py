@@ -43,13 +43,36 @@ def git(*args):
 
 
 def link_directory(target, source):
-    if not source.is_dir():
-        return
+    guard(source.is_dir(), "dependency_source_missing")
     guard(not os.path.lexists(target), "dependency_target_exists")
     if os.name == "nt":
         subprocess.run(["cmd", "/c", "mklink", "/J", str(target), str(source)], check=True, capture_output=True, timeout=10)
     else:
         target.symlink_to(source, target_is_directory=True)
+
+
+def dependency_directories(root):
+    """Mirror each declared workspace, including nested SDK/console packages."""
+    workspaces = json.loads((root / "package.json").read_text()).get("workspaces")
+    patterns = workspaces.get("packages") if isinstance(workspaces, dict) else workspaces
+    guard(isinstance(patterns, list) and bool(patterns), "workspace_patterns_missing")
+    directories = {root / "node_modules"}
+    guard((root / "node_modules").is_dir(), "root_dependencies_missing")
+    for pattern in patterns:
+        guard(isinstance(pattern, str) and bool(pattern), "workspace_pattern_invalid")
+        path = pathlib.PurePosixPath(pattern)
+        guard(not path.is_absolute() and ".." not in path.parts, "workspace_pattern_external")
+        for package in root.glob(pattern):
+            guard(package.resolve().is_relative_to(root.resolve()), "workspace_package_external")
+            if (package / "package.json").is_file():
+                dependencies = package / "node_modules"
+                manifest = json.loads((package / "package.json").read_text())
+                if dependencies.is_dir():
+                    directories.add(dependencies)
+                else:
+                    guard(not any(manifest.get(key) for key in ("dependencies", "devDependencies", "optionalDependencies")),
+                          "workspace_dependencies_missing")
+    return sorted(directories)
 
 
 def instrument(tree, original_test):
@@ -200,11 +223,12 @@ def main():
         git("diff", "--exit-code", TARGET, "HEAD", "--", "packages/core", "bun.lock", "package.json", "packages/*/package.json")
         original = (ROOT / "packages/opencode/test/server/httpapi-file.test.ts").read_text()
         report["original_test_sha256"] = hashlib.sha256(original.encode()).hexdigest()
+        dependencies = dependency_directories(ROOT)
         trees = {}
         for label, revision in [("head", report["head"]), ("baseline", BASE)]:
             tree = WORK / label
             git("worktree", "add", "--detach", str(tree), revision)
-            for dependency in [ROOT / "node_modules", *ROOT.glob("packages/*/node_modules")]:
+            for dependency in dependencies:
                 link_directory(tree / dependency.relative_to(ROOT), dependency)
             instrument(tree, original)
             trees[label] = tree
